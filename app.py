@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 # ✅ Valid API keys
 VALID_API_KEYS = {
-    "ZEXXY"
+    "HK345"
 }
 
 daily_limit = 200
