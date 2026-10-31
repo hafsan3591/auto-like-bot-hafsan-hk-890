@@ -22,8 +22,6 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-
-
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11visit_count.proto\x12\x05proto\"e\n\tBasicInfo\x12\x0b\n\x03UID\x18\x01 \x01(\x03\x12\x16\n\x0ePlayerNickname\x18\x03 \x01(\t\x12\x14\n\x0cPlayerRegion\x18\x05 \x01(\t\x12\x0e\n\x06Levels\x18\x06 \x01(\x03\x12\r\n\x05Likes\x18\x15 \x01(\x03\"-\n\x04Info\x12%\n\x0b\x41\x63\x63ountInfo\x18\x01 \x01(\x0b\x32\x10.proto.BasicInfob\x06proto3')
 
 _globals = globals()
