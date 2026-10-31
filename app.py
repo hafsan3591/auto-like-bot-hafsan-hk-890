@@ -98,7 +98,7 @@ async def send_multiple_requests(uid, region, url):
         if tokens is None:
             return None
         tasks = []
-        for i in range(100):
+        for i in range(300):
             token = tokens[i % len(tokens)]["token"]
             tasks.append(send_request(encrypted_uid, token, url))
         results = await asyncio.gather(*tasks, return_exceptions=True)
