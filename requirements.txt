@@ -3,5 +3,5 @@ requests
 aiohttp
 googleapis-common-protos
 pycryptodome
-protobuf>=6.30.0
+protobuf
 Werkzeug

@@ -6,8 +6,6 @@ import binascii
 import aiohttp
 import requests
 import json
-import base64
-from datetime import datetime
 import like_pb2
 import uid_generator_pb2
 import visit_count_pb2
@@ -21,42 +19,21 @@ VALID_API_KEYS = {
     "hkysxbhyws"
 }
 
-daily_limit = 200          # ✅ দিনে ২০০ UID
+# 🔢 Like limit tracking (২৩০ token → দিনে ৫০০ user serve)
+daily_limit = 500
 used_count = 0
 
-# ✅ BD SERVER URLs (only BD supported)
-BD_PERSONAL_SHOW_URL = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
-BD_LIKE_URL          = "https://clientbp.ggpolarbear.com/LikeProfile"
+# 🇧🇩 Only Bangladesh region allowed
+ALLOWED_REGION = "BD"
+BD_LIKE_URL = "https://clientbp.ggpolarbear.com/LikeProfile"
+BD_INFO_URL = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
 
 
-# ═══════════════════════════════════════════════════
-#  ✅ টোকেন এক্সপায়ারি চেক
-# ═══════════════════════════════════════════════════
-def is_token_expired(token_str):
-    """JWT টোকেন এক্সপায়ার হয়েছে কিনা চেক"""
-    try:
-        p = token_str.split('.')[1]
-        p += '=' * (4 - len(p) % 4)
-        d = json.loads(base64.urlsafe_b64decode(p))
-        return d.get('exp', 0) < datetime.now().timestamp()
-    except Exception:
-        return True
-
-
-def load_tokens(region):
-    """✅ শুধু ভ্যালিড (নন-এক্সপায়ার্ড) টোকেন রিটার্ন করে"""
+def load_tokens():
+    """Load Bangladesh tokens only."""
     try:
         with open("token_bd.json", "r") as f:
-            all_tokens = json.load(f)
-        valid = [t for t in all_tokens if not is_token_expired(t.get("token", ""))]
-        if not valid:
-            app.logger.error(f"❌ সব টোকেন এক্সপায়ার! Total={len(all_tokens)}")
-            return None
-        if len(valid) < len(all_tokens):
-            app.logger.warning(
-                f"⚠️ {len(all_tokens) - len(valid)}টি টোকেন এক্সপায়ার, {len(valid)}টি ভ্যালিড"
-            )
-        return valid
+            return json.load(f)
     except Exception as e:
         app.logger.error(f"Error loading BD tokens: {e}")
         return None
@@ -116,14 +93,16 @@ async def send_multiple_requests(uid, region, url):
         encrypted_uid = encrypt_message(protobuf_message)
         if encrypted_uid is None:
             return None
-        tokens = load_tokens(region)
+        tokens = load_tokens()
         if not tokens:
             return None
+
+        # ✅ সব token use হবে (২৩০টি হলে ২৩০টি, ৩০০ হলে ৩০০টি)
         tasks = []
-        # ✅ safe: 100 বা token সংখ্যা — যেটা ছোট
-        for i in range(min(100, len(tokens))):
-            token = tokens[i]["token"]
+        for i in range(len(tokens)):
+            token = tokens[i % len(tokens)]["token"]
             tasks.append(send_request(encrypted_uid, token, url))
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
     except Exception as e:
@@ -150,8 +129,8 @@ def enc(uid):
 
 
 def make_request(encrypt, region, token):
-    """BD only — always uses BD PersonalShow URL"""
     try:
+        url = BD_INFO_URL
         edata = bytes.fromhex(encrypt)
         headers = {
             "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
@@ -164,15 +143,10 @@ def make_request(encrypt, region, token):
             "X-GA": "v1 1",
             "ReleaseVersion": "OB55"
         }
-        response = requests.post(
-            BD_PERSONAL_SHOW_URL,
-            data=edata,
-            headers=headers,
-            verify=False,
-            timeout=15
-        )
+        response = requests.post(url, data=edata, headers=headers, verify=False)
+        binary = response.content
         decoded = visit_count_pb2.Info()
-        decoded.ParseFromString(response.content)
+        decoded.ParseFromString(binary)
         return decoded
     except DecodeError as e:
         app.logger.error(f"DecodeError: {e}")
@@ -182,33 +156,11 @@ def make_request(encrypt, region, token):
         return None
 
 
-# ═══════════════════════════════════════════════════
-#  ✅ "Failed to get initial info" রিট্রাই
-# ═══════════════════════════════════════════════════
-def fetch_info_with_retry(encrypted_uid, region, max_tries=5):
-    """
-    প্রথম টোকেন ফেইল হলে পরের ৫টি টোকেন চেষ্টা করে।
-    """
-    tokens = load_tokens(region)
-    if not tokens:
-        return None, None
-
-    for i in range(min(max_tries, len(tokens))):
-        tok = tokens[i]["token"]
-        info = make_request(encrypted_uid, region, tok)
-        if info is not None and info.HasField("AccountInfo"):
-            if i > 0:
-                app.logger.info(f"✅ টোকেন {i+1} সফল (প্রথম {i}টি ফেইল)")
-            return info, tok
-        else:
-            app.logger.warning(f"⚠️ টোকেন {i+1} ফেইল, পরেরটা চেষ্টা...")
-    return None, None
-
-
 @app.route('/like', methods=['GET'])
 def handle_requests():
     global used_count
 
+    # ✅ API key check
     api_key = request.args.get("key")
     if api_key not in VALID_API_KEYS:
         result = OrderedDict([
@@ -222,47 +174,47 @@ def handle_requests():
         )
 
     uid = request.args.get("uid")
-    region = request.args.get("region", "").upper()
+    # 🔒 Region is forced to BD (Bangladesh only)
+    region = ALLOWED_REGION
 
-    if not uid or not region:
-        return {"error": "UID and region are required"}, 400
-
-    # ✅ BD-only enforce
-    if region != "BD":
-        return app.response_class(
-            response=json.dumps(
-                {"error": "Only BD region is supported", "status": 4},
-                separators=(',', ':')
-            ),
-            status=400,
-            mimetype='application/json'
-        )
+    if not uid:
+        return {"error": "UID is required"}, 400
 
     try:
+        # Enforce BD daily limit
+        if used_count >= daily_limit:
+            result = OrderedDict([
+                ("error", "Daily limit reached. Try again after 4:00 AM IST."),
+                ("status", 4),
+                ("daily_limit", daily_limit),
+                ("used", used_count),
+                ("remaining", 0)
+            ])
+            return app.response_class(
+                response=json.dumps(result, separators=(',', ':')),
+                status=429,
+                mimetype='application/json'
+            )
+
         def process_request():
             global used_count
 
-            tokens = load_tokens(region)
+            tokens = load_tokens()
             if not tokens:
-                raise Exception("সব টোকেন এক্সপায়ার! token_bd.json-এ নতুন টোকেন দিন।")
-
+                raise Exception("Failed to load BD tokens.")
+            token = tokens[0]['token']
             encrypted_uid = enc(uid)
             if encrypted_uid is None:
                 raise Exception("Encryption of UID failed.")
 
-            # ✅ রিট্রাই — প্রথম টোকেন ফেইল হলে পরের ৫টি চেষ্টা করবে
-            before, working_token = fetch_info_with_retry(encrypted_uid, region)
+            before = make_request(encrypted_uid, region, token)
             if before is None:
-                raise Exception("Failed to get initial info — সব টোকেন চেক করা হয়েছে, কোনোটা কাজ করেনি।")
+                raise Exception("Failed to get initial info.")
             before_like = before.AccountInfo.Likes
 
-            # ✅ BD LikeProfile URL
-            url = BD_LIKE_URL
+            asyncio.run(send_multiple_requests(uid, region, BD_LIKE_URL))
 
-            asyncio.run(send_multiple_requests(uid, region, url))
-
-            # ✅ after-এও working_token ব্যবহার
-            after = make_request(encrypted_uid, region, working_token)
+            after = make_request(encrypted_uid, region, token)
             if after is None:
                 raise Exception("Failed to get final info.")
             after_like = after.AccountInfo.Likes
@@ -280,7 +232,7 @@ def handle_requests():
                 ("LikesbeforeCommand", before_like),
                 ("PlayerNickname", after.AccountInfo.PlayerNickname),
                 ("Level", after.AccountInfo.Levels),
-                ("Region", after.AccountInfo.PlayerRegion),
+                ("Region", "BD"),
                 ("UID", after.AccountInfo.UID),
                 ("status", status),
                 ("daily_limit", daily_limit),
@@ -306,52 +258,14 @@ def remain_info():
     global used_count
     remaining = max(daily_limit - used_count, 0)
     data = {
+        "server": "BD",
         "daily_limit": daily_limit,
         "remaining": remaining,
         "used": used_count,
-        "region": "BD",
         "reset_info": "4:00 AM IST"
     }
     return jsonify(data)
 
 
-# ═══════════════════════════════════════════════════
-#  ✅ টোকেন স্ট্যাটাস চেক
-# ═══════════════════════════════════════════════════
-@app.route('/token_status', methods=['GET'])
-def token_status():
-    try:
-        with open("token_bd.json", "r") as f:
-            all_t = json.load(f)
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-    now = datetime.now().timestamp()
-    valid = expired = 0
-    for t in all_t:
-        try:
-            p = t['token'].split('.')[1]
-            p += '=' * (4 - len(p) % 4)
-            d = json.loads(base64.urlsafe_b64decode(p))
-            if d.get('exp', 0) > now:
-                valid += 1
-            else:
-                expired += 1
-        except Exception:
-            expired += 1
-
-    safety = "🔴 কম" if valid < 200 else ("🟡 মাঝারি" if valid < 300 else ("🟢 ভালো" if valid < 600 else "🟢🟢🟢 চমৎকার"))
-
-    return jsonify({
-        "total": len(all_t),
-        "valid": valid,
-        "expired": expired,
-        "can_send_100_likes": valid >= 100,
-        "daily_limit": daily_limit,
-        "avg_usage_per_token": round(daily_limit / max(valid, 1), 3),
-        "safety": safety
-    })
-
-
 if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)
+    app.run(debug=True, use_reloader=False)
