@@ -30,12 +30,12 @@ BD_INFO_URL = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
 # প্রতি ইউজার 220 লাইক
 # প্রতি গেস্ট আইডি দিনে 50 লাইক
 # token_bd.json এ 230 টা গেস্ট আইডি থাকবে
-TOKEN_DAILY_LIMIT = 50        # প্রতিটা token দিনে 50 বার like
+TOKEN_DAILY_LIMIT = 100        # প্রতিটা token দিনে 50 বার like
 TOTAL_TOKENS = 230            # মোট গেস্ট আইডি সংখ্যা
-TARGET_LIKES_PER_USER = 220   # প্রতি ইউজার 220 লাইক
+TARGET_LIKES_PER_USER = 225   # প্রতি ইউজার 220 লাইক
 # মোট দৈনিক লাইক ক্যাপাসিটি = 230 × 50 = 11500
 # প্রতি ইউজার 220 লাইক => সর্বোচ্চ 11500 // 220 = 52 ইউজার
-DAILY_LIMIT = 52              # দিনে সর্বোচ্চ 52 user (52 × 220 = 11440 ≤ 11500)
+DAILY_LIMIT = 110              # দিনে সর্বোচ্চ 52 user (52 × 220 = 11440 ≤ 11500)
 TOKEN_FAIL_THRESHOLD = 5      # 5 বার fail হলে token skip
 
 # 📊 State management
