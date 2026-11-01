@@ -26,32 +26,36 @@ ALLOWED_REGION = "BD"
 BD_LIKE_URL = "https://clientbp.ggpolarbear.com/LikeProfile"
 BD_INFO_URL = "https://clientbp.ggpolarbear.com/GetPlayerPersonalShow"
 
-# ⚙️ Batch rotation config
-# token_bd.json এ মোট 660 guest id থাকবে → 3 batch × 220
-BATCH_SIZE = 220              # প্রতি batch এ 220 token (guest id)
-TOKEN_DAILY_LIMIT = 20        # প্রতিটা token দিনে 20 বার like
-DAILY_LIMIT = 220             # ✅ পাবলিক দিনে সর্বোচ্চ 220 user target
+# ⚙️ Config
+# প্রতি ইউজার 220 লাইক
+# প্রতি গেস্ট আইডি দিনে 50 লাইক
+# token_bd.json এ 230 টা গেস্ট আইডি থাকবে
+TOKEN_DAILY_LIMIT = 50        # প্রতিটা token দিনে 50 বার like
+TOTAL_TOKENS = 230            # মোট গেস্ট আইডি সংখ্যা
+TARGET_LIKES_PER_USER = 220   # প্রতি ইউজার 220 লাইক
+# মোট দৈনিক লাইক ক্যাপাসিটি = 230 × 50 = 11500
+# প্রতি ইউজার 220 লাইক => সর্বোচ্চ 11500 // 220 = 52 ইউজার
+DAILY_LIMIT = 52              # দিনে সর্বোচ্চ 52 user (52 × 220 = 11440 ≤ 11500)
 TOKEN_FAIL_THRESHOLD = 5      # 5 বার fail হলে token skip
 
 # 📊 State management
 used_count = 0
 token_usage = {}
 token_failures = {}
-current_batch = 0
 last_reset_date = date.today()
 lock = threading.Lock()
 
 
 def reset_if_new_day():
-    global used_count, token_usage, token_failures, current_batch, last_reset_date
+    """নতুন দিনে সব কাউন্টার রিসেট হয় — সব টোকেন আবার 50 লাইক পায়"""
+    global used_count, token_usage, token_failures, last_reset_date
     today = date.today()
     if today != last_reset_date:
         used_count = 0
         token_usage = {}
         token_failures = {}
-        current_batch = 0
         last_reset_date = today
-        app.logger.info("🔄 New day — counters reset")
+        app.logger.info("🔄 New day — counters reset. সব টোকেন আবার 50 লাইক পাবে.")
 
 
 def load_tokens():
@@ -116,42 +120,40 @@ async def send_request(encrypted_uid, token, url):
         return {"token": token, "response": None, "status_code": 0, "success": False}
 
 
-def get_available_tokens(tokens):
+def get_all_available_tokens(tokens):
     """
-    ✅ Batch rotation logic:
-    - প্রথমে batch 0 (0-219 token) দিয়ে like হবে, প্রতিটা 20 বার
-    - batch 0 এর সব token exhausted হলে current_batch = 1 → (220-439)
-    - batch 1 exhausted হলে current_batch = 2 → (440-659)
-    - সব batch exhausted হলে None return
+    সব টোকেন থেকে যেসব এখনো 50 লাইক হয়নি এবং fail হয়নি সেগুলো রিটার্ন করে।
+    কোনো ব্যাচ কনসেপ্ট নেই — সব 230 টোকেন একসাথে ব্যবহার হয়।
     """
-    global current_batch, token_usage, token_failures
+    available = []
+    for idx, entry in enumerate(tokens):
+        used = token_usage.get(idx, 0)
+        fails = token_failures.get(idx, 0)
+        if used < TOKEN_DAILY_LIMIT and fails < TOKEN_FAIL_THRESHOLD:
+            available.append((idx, entry["token"]))
+    return available
 
-    total_batches = (len(tokens) + BATCH_SIZE - 1) // BATCH_SIZE
 
-    # বর্তমান batch থেকে শুরু করে পরের batch গুলো চেক করো
-    while current_batch < total_batches:
-        start = current_batch * BATCH_SIZE
-        end = min(start + BATCH_SIZE, len(tokens))
-        batch_tokens = []
-
-        for idx in range(start, end):
-            used = token_usage.get(idx, 0)
-            fails = token_failures.get(idx, 0)
-            if used < TOKEN_DAILY_LIMIT and fails < TOKEN_FAIL_THRESHOLD:
-                batch_tokens.append((idx, tokens[idx]["token"]))
-
-        if batch_tokens:
-            # এই batch এ এখনো available token আছে
-            return batch_tokens
-
-        # এই batch পুরো exhausted → পরের batch এ যাও
-        app.logger.info(f"➡️ Batch {current_batch} exhausted — switching to batch {current_batch + 1}")
-        current_batch += 1
-
-    return None
+def total_remaining_likes():
+    """সব টোকেনে এখনো কত লাইক বাকি আছে তা হিসাব করে"""
+    tokens = load_tokens() or []
+    remaining = 0
+    for idx in range(len(tokens)):
+        used = token_usage.get(idx, 0)
+        fails = token_failures.get(idx, 0)
+        if fails < TOKEN_FAIL_THRESHOLD:
+            remaining += max(TOKEN_DAILY_LIMIT - used, 0)
+    return remaining
 
 
 async def send_multiple_requests(uid, region, url):
+    """
+    একটি ইউজারকে 220 লাইক দেওয়ার চেষ্টা করে।
+    প্রতিটি টোকেন সর্বোচ্চ 50 লাইক দিতে পারে।
+    220 লাইকের জন্য কমপক্ষে ceil(220/50)=5 টোকেন লাগবে (সাধারণত 220 টোকেন পর্যন্ত)।
+    যেহেতু প্রতিটি টোকেন একবারে একটি লাইক দেয়, তাই 220 লাইক পেতে
+    আমাদের 220 টি আলাদা রিকোয়েস্ট পাঠাতে হবে — প্রতিটি ভিন্ন টোকেন থেকে।
+    """
     global token_usage, token_failures
 
     protobuf_message = create_protobuf_message(uid, region)
@@ -165,24 +167,40 @@ async def send_multiple_requests(uid, region, url):
     if not tokens:
         return None
 
-    available = get_available_tokens(tokens)
-    if not available:
-        return {"error": "All token batches exhausted for today"}
+    likes_achieved = 0
+    target_likes = TARGET_LIKES_PER_USER
+    all_results = []
 
-    tasks = []
-    for idx, token in available:
-        tasks.append(send_request(encrypted_uid, token, url))
+    # যতক্ষণ 220 লাইক না হয় বা available টোকেন না শেষ হয়
+    while likes_achieved < target_likes:
+        available = get_all_available_tokens(tokens)
+        if not available:
+            app.logger.warning("⚠️ সব টোকেন exhausted — আজ আর লাইক দেওয়া সম্ভব না")
+            break
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        # এই রাউন্ডে যত টোকেন দরকার (বাকি লাইকের সমান, তবে available এর বেশি নয়)
+        needed = target_likes - likes_achieved
+        batch = available[:needed]
 
-    for i, result in enumerate(results):
-        idx = available[i][0]
-        if isinstance(result, dict) and result.get("success"):
-            token_usage[idx] = token_usage.get(idx, 0) + 1
-        else:
-            token_failures[idx] = token_failures.get(idx, 0) + 1
+        tasks = [send_request(encrypted_uid, token, url) for idx, token in batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    return results
+        for i, result in enumerate(results):
+            idx = batch[i][0]
+            if isinstance(result, dict) and result.get("success"):
+                token_usage[idx] = token_usage.get(idx, 0) + 1
+                likes_achieved += 1
+            else:
+                token_failures[idx] = token_failures.get(idx, 0) + 1
+            all_results.append(result)
+
+        # যদি কোনো অগ্রগতি না হয় (সব fail), লুপ ভাঙি
+        if not any(isinstance(r, dict) and r.get("success") for r in results):
+            app.logger.warning("⚠️ এই রাউন্ডে কোনো লাইক সফল হয়নি — লুপ থামানো হলো")
+            break
+
+    app.logger.info(f"UID {uid}: মোট {likes_achieved}/{target_likes} লাইক দেওয়া হয়েছে")
+    return all_results
 
 
 def create_protobuf(uid):
@@ -250,9 +268,23 @@ def handle_requests():
             return {"error": "UID is required"}, 400
 
         try:
+            # ✅ চেক: সব টোকেনের 50 লাইক লিমিট শেষ কিনা
+            remaining_likes = total_remaining_likes()
+            if remaining_likes < TARGET_LIKES_PER_USER:
+                result = OrderedDict([
+                    ("error", "সব গেস্ট আইডির দৈনিক 50 লাইক লিমিট শেষ। আগামীকাল আবার চেষ্টা করুন (4:00 AM IST এর পরে)।"),
+                    ("status", 4),
+                    ("total_remaining_likes", remaining_likes),
+                    ("required_per_user", TARGET_LIKES_PER_USER)
+                ])
+                return app.response_class(
+                    response=json.dumps(result, separators=(',', ':')),
+                    status=429, mimetype='application/json'
+                )
+
             if used_count >= DAILY_LIMIT:
                 result = OrderedDict([
-                    ("error", "Daily limit reached. Try again after 4:00 AM IST."),
+                    ("error", "Daily user limit reached. Try again after 4:00 AM IST."),
                     ("status", 4), ("daily_limit", DAILY_LIMIT),
                     ("used", used_count), ("remaining", 0)
                 ])
@@ -286,7 +318,8 @@ def handle_requests():
             if status == 1:
                 used_count += 1
 
-            remaining = max(DAILY_LIMIT - used_count, 0)
+            remaining_users = max(DAILY_LIMIT - used_count, 0)
+            remaining_likes_now = total_remaining_likes()
 
             result = OrderedDict([
                 ("LikesGivenByAPI", like_given),
@@ -297,10 +330,10 @@ def handle_requests():
                 ("Region", "BD"),
                 ("UID", after.AccountInfo.UID),
                 ("status", status),
-                ("current_batch", current_batch),
                 ("daily_limit", DAILY_LIMIT),
                 ("used", used_count),
-                ("remaining", remaining)
+                ("remaining_users", remaining_users),
+                ("total_remaining_likes", remaining_likes_now)
             ])
 
             return app.response_class(
@@ -315,46 +348,28 @@ def handle_requests():
 
 @app.route('/remain', methods=['GET'])
 def remain_info():
-    global used_count, current_batch, token_usage, token_failures
+    global used_count, token_usage, token_failures
     reset_if_new_day()
     tokens = load_tokens() or []
-    total_batches = (len(tokens) + BATCH_SIZE - 1) // BATCH_SIZE
     active_tokens = sum(
         1 for i in range(len(tokens))
         if token_usage.get(i, 0) < TOKEN_DAILY_LIMIT
         and token_failures.get(i, 0) < TOKEN_FAIL_THRESHOLD
     )
-
-    # প্রতি batch এর status
-    batch_status = []
-    for b in range(total_batches):
-        s = b * BATCH_SIZE
-        e = min(s + BATCH_SIZE, len(tokens))
-        active = sum(
-            1 for i in range(s, e)
-            if token_usage.get(i, 0) < TOKEN_DAILY_LIMIT
-            and token_failures.get(i, 0) < TOKEN_FAIL_THRESHOLD
-        )
-        batch_status.append({
-            "batch": b,
-            "tokens": e - s,
-            "active_tokens": active,
-            "exhausted": active == 0
-        })
+    remaining_likes = total_remaining_likes()
 
     data = {
         "server": "BD",
-        "daily_limit": DAILY_LIMIT,
+        "daily_limit_users": DAILY_LIMIT,
         "remaining_users": max(DAILY_LIMIT - used_count, 0),
-        "used": used_count,
-        "total_tokens": len(tokens),
-        "batch_size": BATCH_SIZE,
-        "total_batches": total_batches,
-        "current_batch": current_batch,
-        "active_tokens_today": active_tokens,
+        "used_users": used_count,
+        "target_likes_per_user": TARGET_LIKES_PER_USER,
         "token_daily_limit": TOKEN_DAILY_LIMIT,
+        "total_tokens": len(tokens),
+        "active_tokens_today": active_tokens,
+        "total_remaining_likes_today": remaining_likes,
+        "max_users_possible_today": remaining_likes // TARGET_LIKES_PER_USER,
         "token_fail_threshold": TOKEN_FAIL_THRESHOLD,
-        "batch_status": batch_status,
         "reset_info": "4:00 AM IST"
     }
     return jsonify(data)
